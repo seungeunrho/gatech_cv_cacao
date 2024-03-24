@@ -1,0 +1,4 @@
+name: gym
+channels:
+  - defaults
+prefix: /Users/seungeun/opt/anaconda3/envs/gym
