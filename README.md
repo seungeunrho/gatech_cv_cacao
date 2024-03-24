@@ -1,4 +1,4 @@
-# minimalRL-pytorch
+# Gatech_CV_Cacao
 
 Georgia Tech Computer Vision Course (cs6476) Team Project Page  
 
