@@ -72,7 +72,7 @@ def main(config):
                 iter_num, env.n_epi, model.n_update, score, np.mean(env.step_lst), cur_time))
 
             if score > best_score:
-                model_path = os.path.join(save_dir, f"model_iter{iter_num}_score{score}.pt")
+                model_path = os.path.join(save_dir, "model_iter{}_score{:.1f}.pt".format(iter_num, score))
                 torch.save(model, model_path)
                 best_score = score
                 print(f"new model saved. current best score: {score} ")
