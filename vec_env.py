@@ -5,6 +5,9 @@ from gym.core import ObservationWrapper
 from gymnasium.wrappers import GrayScaleObservation, FrameStack, AtariPreprocessing
 import time
 import collections
+import cv2 
+from skimage.metrics import mean_squared_error,peak_signal_noise_ratio,structural_similarity
+import matplotlib.pyplot as plt
 
 class PreprocessAtari(ObservationWrapper):
     def __init__(self, env):
@@ -22,7 +25,41 @@ class PreprocessAtari(ObservationWrapper):
 
         return img
 
+###### Edge Detection https://www.analyticsvidhya.com/blog/2022/08/comprehensive-guide-to-edge-detection-algorithms/ #######
+class EdgeDetection(ObservationWrapper):
+    def __init__(self, env):
+        """A gym wrapper that crops, scales image into the desired shapes and optionally grayscales it."""
+        ObservationWrapper.__init__(self, env)
 
+    def observation(self, img):
+        """what happens to each observation"""
+
+        img1 = (img * 255).astype(np.uint8)
+        
+        # Enhance contrast using histogram equalization on the V channel of the HSV image
+        hsv_img = cv2.cvtColor(img1, cv2.COLOR_RGB2HSV)
+        hsv_img[:, :, 2] = cv2.equalizeHist(hsv_img[:, :, 2])
+        img_enhanced = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2RGB)
+        
+        # Convert enhanced image to grayscale
+        gray_img = cv2.cvtColor(img_enhanced, cv2.COLOR_RGB2GRAY)
+        
+        # Apply Canny edge detector with adjusted thresholds
+        edges = cv2.Canny(gray_img, 5, 100)  # Example: lower threshold is reduced
+        
+        # # Example: replacing one channel with edges, adjust as needed
+        # img1[:, :, 2] = edges
+        # gray_img = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+        # fig, ax = plt.subplots(1, 2, figsize=(18, 18))
+        # ax[0].imshow(img, cmap='gray')
+        # ax[1].imshow(gray_img, cmap='gray')
+        # for a in ax:
+        #     a.axis('off')
+        # # Save the figure to a file
+        # fig.savefig('image/image.png')
+        # plt.close(fig)  # Close the figure to free memory
+        return img1
+###########
 
 class VecEnv:
     def __init__(self, n_env=10, step_limit=1000):
@@ -34,9 +71,11 @@ class VecEnv:
         self.n_epi = 0
         for i in range(n_env):
             env = gym.make("Breakout-v4", obs_type="rgb", frameskip=1)
+            env = EdgeDetection(env)
             env = AtariPreprocessing(env)
             env = PreprocessAtari(env)
             env = FrameStack(env, num_stack=4)
+
             self.env_lst.append(env)
             self.score_lst.append(0.)
             self.step_lst.append(0)
