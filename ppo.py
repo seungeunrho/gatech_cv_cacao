@@ -48,8 +48,15 @@ class PPO(nn.Module):
 
             nn.ReLU(inplace=False),
             nn.Linear(128, 1)
-
         )
+
+        if self.config["add_aux_loss"]:
+            self.fc_aux = nn.Sequential(
+                nn.Linear(2560, 128),
+                nn.ReLU(inplace=False),
+                nn.Linear(128, 1)
+            )
+
         self.optimizer = optim.Adam(self.parameters(), lr=self.config["learning_rate"])
 
     def _init_data(self):
@@ -72,6 +79,11 @@ class PPO(nn.Module):
         x = self.cnn(x)
         v = self.fc_v(x)
         return v
+
+    def reward_predict(self, x):
+        x = self.cnn(x)
+        r_pred = self.fc_aux(x)
+        return r_pred
 
     def put_data(self, transition):
         self.data.append(transition)
@@ -126,9 +138,18 @@ class PPO(nn.Module):
 
                 surr1 = ratio * advantage
                 surr2 = torch.clamp(ratio, 1 - self.config["eps_clip"], 1 + self.config["eps_clip"]) * advantage
-                loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(self.v(s), td_target.detach())
+                critic_loss = F.smooth_l1_loss(self.v(s), td_target.detach()).mean()
+                actor_loss = -torch.min(surr1, surr2).mean()
+                loss = actor_loss + critic_loss
+
+                aux_loss = 0.0
+                if self.config["add_aux_loss"]:
+                    r_pred = self.reward_predict(s)
+                    aux_loss = F.smooth_l1_loss(r_pred, r.detach()).mean() * 0.1
+                    loss += aux_loss
 
                 self.optimizer.zero_grad()
                 loss.mean().backward()
                 self.optimizer.step()
                 self.n_update += 1
+        return actor_loss.item(), critic_loss.item(), aux_loss.item()

@@ -9,7 +9,7 @@ from ppo import PPO
 import os
 from datetime import datetime
 import matplotlib.pyplot as plt
-
+import argparse
 
 
 
@@ -60,24 +60,27 @@ def main(config):
                         np.stack(prob_a_lst).transpose(1, 0, 2),
                         np.stack(done_lst).transpose(1, 0)))
 
-        model.train_net()
+        actor_loss, critic_loss, aux_loss = model.train_net()
 
-
+        score = np.mean(env.score_buffer)
         if iter_num % config["print_interval"] == 0:
-            score = np.mean(env.score_buffer)
-
             cur_time = (time.time() - t1) / 60.0
-            writer.add_scalar('n_epi', env.n_epi, iter_num)
-            writer.add_scalar('n_update', model.n_update, iter_num)
-            writer.add_scalar('score', score, iter_num)
+            writer.add_scalar('train/n_epi', env.n_epi, iter_num)
+            writer.add_scalar('train/n_update', model.n_update, iter_num)
+            writer.add_scalar('train/score', score, iter_num)
+            writer.add_scalar('loss/actor_loss', actor_loss, iter_num)
+            writer.add_scalar('loss/critic_loss', critic_loss, iter_num)
+
+            writer.add_scalar('loss/aux_loss', aux_loss, iter_num)
+
+
             print("Iter:{}, n_epi:{}, n_update:{}, score:{:.1f}, mean_step:{:.1f}, time: {:.1f}mins".format(
                 iter_num, env.n_epi, model.n_update, score, np.mean(env.step_lst), cur_time))
 
-            if score > best_score:
-                model_path = os.path.join(save_dir, "model_iter{}_score{:.1f}.pt".format(iter_num, score))
-                torch.save(model, model_path)
-                best_score = score
-                print(f"new model saved. current best score: {score} ")
+        if iter_num % config["save_interval"] == 0 and (iter_num != 0):
+            model_path = os.path.join(save_dir, "model_iter{}_score{:.1f}.pt".format(iter_num, score))
+            torch.save(model, model_path)
+            print(f"new model saved. current score: {score} ")
 
 
 if __name__ == '__main__':
@@ -92,7 +95,16 @@ if __name__ == '__main__':
         "n_env": 24,
         "step_limit": 500,
         "print_interval": 10,
+        "save_interval": 500,
         "train_iter": 100000,
+        "add_aux_loss": False,
     }
+
+    parser = argparse.ArgumentParser(prog='ProgramName')
+    parser.add_argument('--add_aux_loss', default=False, type=bool, help='whether to add auxiliary loss of predicting reward')
+
+    args = parser.parse_args()
+    config["add_aux_loss"] = args.add_aux_loss
+
     main(config)
 
