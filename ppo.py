@@ -12,6 +12,28 @@ import time
 import collections
 import cv2
 from torch.optim import Adam
+from einops import rearrange, repeat
+
+
+class ViTEncoder(ViT):
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, n, _ = x.shape
+
+        cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b=b)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+
+        x = self.transformer(x)
+
+        x = x.mean(dim=1) if self.pool == 'mean' else x[:, 0]
+
+
+        return x
+
+
+
 class PPO(nn.Module):
     def __init__(self, config, device):
         super(PPO, self).__init__()
@@ -19,45 +41,38 @@ class PPO(nn.Module):
         self.device = device
         self.n_update = 0
         self.config = config
-        self.vit = ViT(
-                image_size=(66, 84),  # Adjusted image size
-                patch_size=6,   # Adjusted patch size
-                num_classes = 1,
-                dim = 128,#256,
-                depth = 2,
-                heads = 2,
-                mlp_dim = 256,
-                channels= 4,
-                dropout = 0.1,
-                emb_dropout = 0.1
-            ).to(device)
-        self.vit_pi = ViT(
-                image_size=(66, 84),  # Adjusted image size
-                patch_size=6,   # Adjusted patch size
-                num_classes = 4,
-                dim = 128,#256,
-                depth = 2,
-                heads = 2,
-                mlp_dim = 256,
-                channels= 4,
-                dropout = 0.1,
-                emb_dropout = 0.1
-            ).to(device)        
-        self.cnn = nn.Sequential(
-            nn.Conv2d(4, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=False),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=False),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=False),
-            nn.MaxPool2d(2, 2),
-            nn.Flatten()
-        )
+        
+        if self.config["image_encoder"] == "vit":
+            self.image_encoder = ViTEncoder(
+                    image_size=(66, 84),  # Adjusted image size
+                    patch_size=6,   # Adjusted patch size
+                    num_classes = 1,
+                    dim = 128,#256,
+                    depth = 2,
+                    heads = 2,
+                    mlp_dim = 256,
+                    channels= 4,
+                    dropout = 0.0,
+                    emb_dropout = 0.0
+                ).to(device)
+            out_dim = 128
+        elif self.config["image_encoder"] == "cnn":
+            self.image_encoder = nn.Sequential(
+                nn.Conv2d(4, 16, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=False),
+                nn.MaxPool2d(2, 2),
+                nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=False),
+                nn.MaxPool2d(2, 2),
+                nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=False),
+                nn.MaxPool2d(2, 2),
+                nn.Flatten()
+            )
+            out_dim = 2560
 
         self.fc_pi = nn.Sequential(
-            nn.Linear(2560, 128),
+            nn.Linear(out_dim, 128),
             # nn.Linear(3200, 128),
 
             nn.ReLU(inplace=False),
@@ -66,7 +81,7 @@ class PPO(nn.Module):
         )
 
         self.fc_v = nn.Sequential(
-            nn.Linear(2560, 128),
+            nn.Linear(out_dim, 128),
             # nn.Linear(3200, 128),
 
             nn.ReLU(inplace=False),
@@ -84,22 +99,18 @@ class PPO(nn.Module):
             "done_mask":[],
             "prob_a":[]
         }
-    def ViT_model(self,x):
-        return self.vit(x)
-    def ViT_pi(self,x):
-        return self.vit_pi(x)
+
     def pi(self, x):
-        x = self.cnn(x)
+        x = self.image_encoder(x)
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
         return prob
 
     def v(self, x):
-        x = self.cnn(x)
+        x = self.image_encoder(x)
         v = self.fc_v(x)
         return v
-    def pi_vit(self,x):
-        return self.vit(x)
+
     def put_data(self, transition):
         self.data.append(transition)
         
@@ -126,7 +137,6 @@ class PPO(nn.Module):
         self.data = []
 
 
-
         return s_lst, a_lst, r_lst, s_prime_lst, not_done_lst, prob_a_lst
 
     def train_net(self):
@@ -136,52 +146,9 @@ class PPO(nn.Module):
             for s, a, r, s_prime, done_mask, prob_a in zip(s_lst, a_lst, r_lst, s_prime_lst, not_done_lst, prob_a_lst):
                 with torch.no_grad():
                     td_target = r + self.config["gamma"] * self.v(s_prime) * done_mask
-                    if self.config["image_encoder"] == "cnn":
-                        delta = td_target - self.v(s)
-                    elif self.config["image_encoder"] == "vit":
-                        delta = td_target - self.ViT_model(s)
-                    # delta = td_target - self.v(s)
+                    delta = td_target - self.v(s)
                     delta = delta.to("cpu").detach().numpy()
-                # print(prob_a.shape)
-                advantage_lst = []
-                advantage = 0.0
-                for delta_t in delta[::-1]:
-                    advantage = self.config["gamma"] * self.config["lmbda"] * advantage + delta_t[0]
-                    advantage_lst.append([advantage])
-                advantage_lst.reverse()
-                advantage = torch.tensor(advantage_lst, dtype=torch.float, device=self.device, requires_grad=False)
-                if self.config["image_encoder"] == "cnn":
-                    pi = self.pi(s)
-                elif self.config["image_encoder"] == "vit":
-                    pi = self.vit_pi(s)
-                # pi = self.pi(s)
-                pi_a = pi.gather(1, a)
-                ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
 
-                surr1 = ratio * advantage
-                surr2 = torch.clamp(ratio, 1 - self.config["eps_clip"], 1 + self.config["eps_clip"]) * advantage
-                loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(self.v(s), td_target.detach())
-
-                self.optimizer.zero_grad()
-                loss.mean().backward()
-                self.optimizer.step()
-                self.n_update += 1
-
-    def train_net_vit(self):
-        s_lst, a_lst, r_lst, s_prime_lst, not_done_lst, prob_a_lst = self.make_batch()
-
-        for i in range(self.config["K_epoch"]):
-            for s, a, r, s_prime, done_mask, prob_a in zip(s_lst, a_lst, r_lst, s_prime_lst, not_done_lst, prob_a_lst):
-                with torch.no_grad():
-                    td_target = r + self.config["gamma"] * self.v(s_prime) * done_mask
-                    # print(s.shape)
-                    # print(td_target.shape)                 
-                       # batch_size, channels, height, width = s.shape
-                    # patch_size = 6
-                    # input_data = input_data = s.view(batch_size, channels * (height // patch_size) * (width // patch_size), patch_size ** 2)
-                    delta = td_target - self.ViT_model(s)
-                    delta = delta.to("cpu").detach().numpy()
-                # print(prob_a.shape)
                 advantage_lst = []
                 advantage = 0.0
                 for delta_t in delta[::-1]:
@@ -190,17 +157,25 @@ class PPO(nn.Module):
                 advantage_lst.reverse()
                 advantage = torch.tensor(advantage_lst, dtype=torch.float, device=self.device, requires_grad=False)
 
-                # pi = self.pi(s)
-                pi = self.vit_pi(s)
-                # print(pi.shape)
+                pi = self.pi(s)
                 pi_a = pi.gather(1, a)
                 ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
 
                 surr1 = ratio * advantage
                 surr2 = torch.clamp(ratio, 1 - self.config["eps_clip"], 1 + self.config["eps_clip"]) * advantage
-                loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(self.v(s), td_target.detach())
+                critic_loss = F.smooth_l1_loss(self.v(s), td_target.detach()).mean()
+                actor_loss = -torch.min(surr1, surr2).mean()
+                loss = actor_loss + critic_loss
+
+                aux_loss_report = 0.0
+                if self.config["add_aux_loss"]:
+                    r_pred = self.reward_predict(s)
+                    aux_loss = F.smooth_l1_loss(r_pred, r.detach()).mean() * 0.1
+                    loss += aux_loss
+                    aux_loss_report = aux_loss.item()
 
                 self.optimizer.zero_grad()
                 loss.mean().backward()
                 self.optimizer.step()
                 self.n_update += 1
+        return actor_loss.item(), critic_loss.item(), aux_loss_report

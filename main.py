@@ -1,6 +1,6 @@
 import torch
 from torch.distributions import Categorical
-import csv
+
 import numpy as np
 from vec_env import VecEnv
 import time
@@ -9,13 +9,10 @@ from ppo import PPO
 import os
 from datetime import datetime
 import matplotlib.pyplot as plt
-from vit_pytorch import ViT
-
-
+import argparse
 
 
 def main(config):
-    print(torch.cuda.is_available())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     now = datetime.now()
@@ -28,15 +25,8 @@ def main(config):
 
     env = VecEnv(n_env=config["n_env"], step_limit=config["step_limit"])
     model = PPO(config, device).to(device)
-    # model = ViT(config).to(device)
-
     score = 0.0
     best_score = -5000.0
-    results = {
-    'scores': [],
-    'iteration': []
-
-    }
 
     t1 = time.time()
     s = env.reset_all()
@@ -68,37 +58,29 @@ def main(config):
                         np.stack(prob_a_lst).transpose(1, 0, 2),
                         np.stack(done_lst).transpose(1, 0)))
 
-        model.train_net()
-        # model.train_net_vit()
+        actor_loss, critic_loss, aux_loss = model.train_net()
 
+        score = np.mean(env.score_buffer)
         if iter_num % config["print_interval"] == 0:
-            score = np.mean(env.score_buffer)
-
             cur_time = (time.time() - t1) / 60.0
-            writer.add_scalar('n_epi', env.n_epi, iter_num)
-            writer.add_scalar('n_update', model.n_update, iter_num)
-            writer.add_scalar('score', score, iter_num)
+            writer.add_scalar('train/n_epi', env.n_epi, iter_num)
+            writer.add_scalar('train/n_update', model.n_update, iter_num)
+            writer.add_scalar('train/score', score, iter_num)
+            writer.add_scalar('loss/actor_loss', actor_loss, iter_num)
+            writer.add_scalar('loss/critic_loss', critic_loss, iter_num)
+
+            writer.add_scalar('loss/aux_loss', aux_loss, iter_num)
+
+
             print("Iter:{}, n_epi:{}, n_update:{}, score:{:.1f}, mean_step:{:.1f}, time: {:.1f}mins".format(
                 iter_num, env.n_epi, model.n_update, score, np.mean(env.step_lst), cur_time))
-            results['scores'].append(score)
-            results['iteration'].append(iter_num)
-            writer.add_scalar('Score', score, iter_num)
-            if score > best_score:
-                model_path = os.path.join(save_dir, "model_iter{}_score{:.1f}.pt".format(iter_num, score))
-                torch.save(model, model_path)
-                best_score = score
-                print(f"new model saved. current best score: {score} ")
-    csv_file_path = os.path.join(save_dir, "results.csv")
-    with open(csv_file_path, mode='w', newline='') as csv_file:
-        writer_csv = csv.writer(csv_file)
-        
-        # Write header
-        writer_csv.writerow([config["image_encoder"],'Iteration', 'Scores'])
-        
-        # Write data
-        for i in range(len(results['scores'])):
-            writer_csv.writerow([i, results['iteration'][i], results['scores'][i]])
-    # writer.close()
+
+        if iter_num % config["save_interval"] == 0 and (iter_num != 0):
+            model_path = os.path.join(save_dir, "model_iter{}_score{:.1f}.pt".format(iter_num, score))
+            torch.save(model, model_path)
+            print(f"new model saved. current score: {score} ")
+
+
 if __name__ == '__main__':
     config = {
         "learning_rate": 0.0001,
@@ -111,8 +93,19 @@ if __name__ == '__main__':
         "n_env": 24,
         "step_limit": 500,
         "print_interval": 10,
-        "train_iter": 10000,#30000,#100000,
+        "save_interval": 500,
+        "train_iter": 100000,
+        "add_aux_loss": False,
         "image_encoder": "vit"
     }
-    main(config)
 
+    parser = argparse.ArgumentParser(prog='ProgramName')
+    parser.add_argument('--add_aux_loss', default=False, type=bool, help='whether to add auxiliary loss of predicting reward')
+    parser.add_argument('--image_encoder', default="cnn", type=str,
+                        help='which image encoder you are going to use?  cnn/vit')
+
+    args = parser.parse_args()
+    config["add_aux_loss"] = args.add_aux_loss
+    config["image_encoder"] = args.image_encoder
+
+    main(config)
